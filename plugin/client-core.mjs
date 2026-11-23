@@ -150,8 +150,30 @@ function sanitizeSVG(answer) {
   return new XMLSerializer().serializeToString(root);
 }
 
+// Summarize quality checks only: fingerprint similarity is not a quality verdict.
+function indicatorStatus(state, error) {
+  if (error) return {tone: 'error', label: '连接异常'};
+  if (!state) return {tone: 'idle', label: '正在读取检测状态'};
+  const records = (state.results || []).filter(item => item.prompt !== 'modeltrace')
+    .map((item, index) => ({item, index})).sort((a, b) =>
+      (Date.parse(b.item.time) || 0) - (Date.parse(a.item.time) || 0) || b.index - a.index).map(entry => entry.item);
+  const active = records.filter(item => item.verdict === 'running');
+  const record = active[0] || records[0];
+  if (!record) return {tone: 'idle', label: '尚未检测'};
+  const verdict = displayVerdict(record);
+  const previous = records.slice(records.indexOf(record) + 1).find(item =>
+    item.provider === record.provider && item.model === record.model && item.prompt === record.prompt);
+  let tone = verdict === 'passed' && previous?.verdict === 'failed' ? 'retested'
+    : verdict === 'unavailable' || verdict === 'truncated' ? 'error'
+    : verdict === 'empty' ? 'failed' : verdict;
+  if (!['running', 'passed', 'retested', 'failed', 'error', 'manual'].includes(tone)) tone = 'idle';
+  const labels = {running: '正在检测', passed: '本次通过', retested: '复测通过（前次未通过）',
+    failed: '本次未通过', error: '调用异常', manual: '待人工评审', idle: '检测已取消／未开始'};
+  return {tone, label: labels[tone], record, runningCount: active.length};
+}
+
 export const core = {
-  identity, modelLabel, names, reviewNames, isCancelled, displayVerdict,
+  identity, modelLabel, names, reviewNames, isCancelled, displayVerdict, indicatorStatus,
   dateTime, reportedTokens, usageLabel, usageTotals,
   dayCount, traceRunning, traceBatchState, traceChallenge, filterResults, analyzeAnswer, sanitizeSVG,
 };

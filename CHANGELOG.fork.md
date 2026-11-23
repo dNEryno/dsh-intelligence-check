@@ -1,5 +1,12 @@
 # Fork changes / 分支修改日志
 
+## 2026-11-24 — Persistent sidebar quality indicator
+
+- Replace the existing sidebar entry's static icon with a persistent colored status lamp and accessible tooltip (target, prompt, timestamp). The existing entry still opens the quality page.
+- Read existing state sequentially every three seconds; no model requests or automatic-check settings are changed. Dispose polling on unmount and clear old success on connection failure.
+- Running checks take priority across targets; otherwise summarize the latest quality record. Distinguish passed, same-target/prompt failed-then-passed, failed, call/connection error, manual review and untested/cancelled. Exclude fingerprint challenges from quality verdicts.
+- Validation: focused indicator state tests and client component tests; rebuild generated client artifact. Browser visual verification requires a refresh after deployment.
+
 ## 2026-11-23 — Current DSH compatibility and catalog recovery
 
 Based on upstream v0.3.4 (29801b2).

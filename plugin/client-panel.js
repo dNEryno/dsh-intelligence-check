@@ -42,11 +42,44 @@ function Icon(props) {
 }
 
 function PanelIcon(props) {
-  return h(Icon, {name: 'activity', size: props.size || 20});
+  const [snapshot, setSnapshot] = useState({data: null, error: null});
+  useEffect(() => {
+    let disposed = false;
+    let timer;
+    const refresh = async () => {
+      try {
+        const data = await request('/state', undefined, AbortSignal.timeout(10000));
+        if (!disposed) setSnapshot({data, error: null});
+      } catch (error) {
+        if (!disposed) setSnapshot({data: null, error});
+      } finally {
+        if (!disposed) timer = setTimeout(refresh, 3000);
+      }
+    };
+    refresh();
+    return () => { disposed = true; clearTimeout(timer); };
+  }, []);
+  const status = core.indicatorStatus(snapshot.data?.state, snapshot.error);
+  const record = status.record;
+  const prompt = snapshot.data?.prompts?.find(item => item.id === record?.prompt);
+  const title = ['模型质量检测：' + status.label,
+    record ? `模型：${core.modelLabel(record.provider, record.model)}` : '',
+    record ? `题目：${prompt?.name || record.prompt} · ${core.dateTime(record.time, true)}` : '',
+    status.runningCount > 1 ? `共 ${status.runningCount} 个检测正在运行` : '',
+    '汇总所有检测目标；运行优先，否则显示最近记录。仅代表该次题目结果。'].filter(Boolean).join('\n');
+  const colors = {idle: '#9299a5', running: '#479cf5', passed: '#29ad73', retested: '#e4ae28',
+    failed: '#e44f59', error: '#e88036', manual: '#a484df'};
+  return h('span', {title, role: 'img', 'aria-label': title,
+    style: {display: 'inline-flex', width: props.size || 20, height: props.size || 20, alignItems: 'center', justifyContent: 'center'}},
+    h('svg', {width: props.size || 20, height: props.size || 20, viewBox: '0 0 20 20', 'aria-hidden': true},
+      h('circle', {cx: 10, cy: 10, r: 7, fill: colors[status.tone], stroke: 'currentColor', strokeWidth: 1}),
+      h('text', {x: 10, y: 13.5, textAnchor: 'middle', fill: '#111827', fontSize: 10, fontWeight: 800},
+        {idle: '·', running: '…', passed: '✓', retested: '↻', failed: '×', error: '!', manual: '?'}[status.tone])));
 }
 
-async function request(pathname, body) {
+async function request(pathname, body, signal) {
   const response = await fetch(API + pathname, {
+    signal,
     method: body === undefined ? 'GET' : 'POST',
     headers: body === undefined ? {} : {'content-type': 'application/json'},
     body: body === undefined ? undefined : JSON.stringify(body),

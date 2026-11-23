@@ -62,6 +62,17 @@ async function pageWith(overrides) {
   return {page: registrations.find(item => item.definition.name === 'main').component, React};
 }
 
+test('sidebar indicator stays visible and describes model, prompt, time without claiming session identity', async () => {
+  const {exports} = await loadBundle([{data: {state: {results: [{provider: 'p', model: 'm', prompt: 'milk', verdict: 'passed', time: '2026-11-23T12:00:00Z'}]}, prompts: [{id: 'milk', name: '牛奶题'}]}, error: null}]);
+  const {registrations} = registrationsOf(exports);
+  const icon = registrations.find(item => item.definition.name === 'sidebar.panellist').component({size: 20});
+  assert.match(icon.props.title, /p \/ m/);
+  assert.match(icon.props.title, /牛奶题/);
+  assert.match(icon.props.title, /11.*23/);
+  assert.match(icon.props.title, /最近记录/);
+  assert.equal(icon.children[0].children[0].props.fill, '#29ad73');
+});
+
 function containsText(element, text) {
   if (element === null || element === undefined) return false;
   if (typeof element === 'string') return element.includes(text);
@@ -106,8 +117,9 @@ test('apply registers the sidebar entry and the same-id main page', async () => 
   assert.equal(main.definition.key, 'dsh-intelligence-check');
   assert.equal(typeof sidebar.component, 'function');
   assert.equal(typeof main.component, 'function');
-  assert.equal(sidebar.component({size: 18}).props.name, 'activity');
-  assert.equal(sidebar.component({size: 18}).props.size, 18);
+  const indicator = sidebar.component({size: 18});
+  assert.equal(indicator.props.role, 'img');
+  assert.equal(indicator.children[0].props.width, 18);
 });
 
 test('the main page renders its empty connection state without data', async () => {
