@@ -1,6 +1,7 @@
 import os from 'node:os';
 import path from 'node:path';
 import {Readable} from 'node:stream';
+import {writeFile} from 'node:fs/promises';
 import {fileURLToPath} from 'node:url';
 import {createBackend, resolveBinary} from './backend.mjs';
 import {createBridge} from './bridge.mjs';
@@ -20,8 +21,11 @@ async function readCatalog(llm) {
   const settled = await Promise.allSettled(providers.map(provider => llm.listModels(provider.id)));
   const models = [];
   settled.forEach((result, index) => {
-    if (result.status !== 'fulfilled') return;
     const provider = providers[index];
+    if (result.status !== 'fulfilled') {
+      console.error(`[dsh-intelligence-check] 模型提供方 ${provider.id} 目录读取失败：${result.reason?.message || String(result.reason)}`);
+      return;
+    }
     for (const model of result.value) {
       models.push({
         provider: provider.id,
@@ -31,6 +35,9 @@ async function readCatalog(llm) {
       });
     }
   });
+  if (providers.length > 0 && settled.every(result => result.status === 'rejected')) {
+    throw new Error('所有模型提供方目录读取失败，保留上次目录');
+  }
   return models;
 }
 
@@ -94,20 +101,40 @@ export async function apply(ctx, config = {}) {
     });
     await backend.attach();
   }
-  const syncCatalog = () => {
-    // A joined instance never overwrites the owner's desktop model catalog.
+  let catalogSync;
+  let catalogSyncedAt = 0;
+  let catalogAttemptAt = 0;
+  let catalogError;
+  const syncCatalog = (force = false) => {
     if (!backend?.owner) return Promise.resolve();
-    return readCatalog(ctx.llm).then(
-      models => backend.setCatalog(models),
-      error => console.error(`[dsh-intelligence-check] 模型目录读取失败：${error.message}`),
-    );
+    if (catalogSync) return catalogSync;
+    if (catalogError && Date.now() - catalogAttemptAt < 10000) return Promise.reject(catalogError);
+    if (!force && Date.now() - catalogSyncedAt < 30000) return Promise.resolve();
+    catalogAttemptAt = Date.now();
+    catalogSync = (async () => {
+      try {
+        const models = await readCatalog(ctx.llm);
+        await backend.setCatalog(models);
+        catalogSyncedAt = Date.now();
+        catalogError = undefined;
+        await writeFile(path.join(sharedDataDir(process.env), 'catalog-diagnostic.json'), JSON.stringify({at: new Date().toISOString(), pid: process.pid, desktop, owner: backend.owner, models: models.length})).catch(error => console.error(`[dsh-intelligence-check] 诊断写入失败：${error.message}`));
+      } catch (error) {
+        catalogError = error;
+        console.error(`[dsh-intelligence-check] 模型目录同步失败：${error.message}`);
+        throw error;
+      } finally {
+        catalogSync = undefined;
+      }
+    })();
+    return catalogSync;
   };
   if (desktop) {
     // Subscribe even when this instance starts as a joiner, so the catalog
     // keeps updating after it takes over ownership.
-    ctx.on('llm/adapters-updated', syncCatalog);
-    ctx.on('llm/models-updated', syncCatalog);
-    await syncCatalog();
+    const refreshCatalog = () => syncCatalog(true).catch(() => {});
+    ctx.on('llm/adapters-updated', refreshCatalog);
+    ctx.on('llm/models-updated', refreshCatalog);
+    await refreshCatalog();
     console.error(`[dsh-intelligence-check] backend ready, shared=${backend.origin}, owner=${backend.owner}`);
   } else {
     console.error(backend.origin
@@ -121,10 +148,10 @@ export async function apply(ctx, config = {}) {
     child.effect(() => child.webServer.register({
       kind: 'prefix',
       path: ROUTE,
-      handler: async (request, response) => {
-        const rejection = child.connection.requestRejection(request);
-        if (rejection) {
-          response.statusCode = rejection;
+      handler: async (request, response, peer) => {
+        // The WebServer authenticates required routes before passing the peer.
+        if (peer?.principal?.kind !== 'owner') {
+          response.statusCode = 403;
           response.end();
           return;
         }
@@ -134,6 +161,7 @@ export async function apply(ctx, config = {}) {
           response.end();
           return;
         }
+        try {
         if (!backend?.origin) {
           // A CLI/Web host may have started before the desktop backend. Its
           // ensure() only attaches, so retry the join on first use.
@@ -143,7 +171,7 @@ export async function apply(ctx, config = {}) {
           }
           if (backend.owner) await syncCatalog();
         }
-        try {
+          if (backend.owner && suffix === '/api/state') await syncCatalog();
           const headers = {authorization: 'Bearer ' + backend.control};
           for (const name of ['content-type', 'accept']) {
             if (request.headers[name]) headers[name] = request.headers[name];
