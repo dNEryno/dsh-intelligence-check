@@ -1,5 +1,11 @@
 # Fork changes / 分支修改日志
 
+## 2026-11-24 — Follow the current conversation model
+
+- 主灯仅匹配当前对话的 provider/model；订阅 DSH 会话 mainView 及官方模型选择目录，切换会话或模型即时更新，Auto effort 不影响匹配。未测灰色，无法确定模型明确显示未知，不借用其他模型的结果。
+- 悬停列出所有检测模型各自的最近状态（运行优先），保留复测通过、调用异常与待人工评审说明；断联清除旧绿灯。只读现有状态，不触发模型调用。
+- Use the same per-session model directory as the composer, including resolved default routes; subscribe to session and model switches and dispose subscriptions on unmount. Focused tests cover strict route matching, unknown/untested, switches, cleanup and the rendered tooltip.
+
 ## 2026-11-24 — Persistent sidebar quality indicator
 
 - Replace the existing sidebar entry's static icon with a persistent colored status lamp and accessible tooltip (target, prompt, timestamp). The existing entry still opens the quality page.

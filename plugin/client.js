@@ -369,7 +369,12 @@ function sanitizeSVG(answer) {
 }
 
 // Summarize quality checks only: fingerprint similarity is not a quality verdict.
-function indicatorStatus(state, error) {
+function indicatorStatus(state, error, selection) {
+  if (arguments.length >= 3) {
+    if (error) return {tone: 'error', label: '连接异常'};
+    if (!selection?.provider || !selection?.model) return {tone: 'idle', label: '当前对话模型未知'};
+    state = state && {...state, results: (state.results || []).filter(item => item.provider === selection.provider && item.model === selection.model)};
+  }
   if (error) return {tone: 'error', label: '连接异常'};
   if (!state) return {tone: 'idle', label: '正在读取检测状态'};
   const records = (state.results || []).filter(item => item.prompt !== 'modeltrace')
@@ -439,7 +444,32 @@ function Icon(props) {
   return h('svg', attributes, ...(ICON_PATHS[props.name] || []).map(([tag, data], index) => h(tag, {...data, key: index})));
 }
 
+// Subscribe to the same per-session directory used by DSH's composer model selector.
+function watchCurrentModel(ctx, update) {
+  const sessions = ctx.get?.('sessions');
+  const directories = ctx.get?.('modelDirectories');
+  if (!sessions?.list || !directories?.directoryFor) { update(null); return () => {}; }
+  let id, unsubscribeModel = () => {};
+  const sync = () => {
+    const rows = Object.values(sessions.list.getSnapshot().byId || {});
+    const current = rows.filter(row => (row.retainedBy?.mainView || 0) > 0);
+    const next = current.length === 1 ? current[0].id : undefined;
+    if (next === id) return;
+    unsubscribeModel(); unsubscribeModel = () => {}; id = next; update(null);
+    if (!id) return;
+    try {
+      const store = directories.directoryFor(id).store;
+      const publish = () => update(store.getSnapshot().current || null);
+      unsubscribeModel = store.subscribe(publish); publish();
+    } catch { update(null); }
+  };
+  const unsubscribeList = sessions.list.subscribe(sync); sync();
+  return () => { unsubscribeList(); unsubscribeModel(); };
+}
+
 function PanelIcon(props) {
+  const [selection, setSelection] = useState(null);
+  useEffect(() => watchCurrentModel(props.context, setSelection), [props.context]);
   const [snapshot, setSnapshot] = useState({data: null, error: null});
   useEffect(() => {
     let disposed = false;
@@ -457,14 +487,22 @@ function PanelIcon(props) {
     refresh();
     return () => { disposed = true; clearTimeout(timer); };
   }, []);
-  const status = core.indicatorStatus(snapshot.data?.state, snapshot.error);
+  const status = core.indicatorStatus(snapshot.data?.state, snapshot.error, selection);
   const record = status.record;
   const prompt = snapshot.data?.prompts?.find(item => item.id === record?.prompt);
+  const targets = [...(snapshot.data?.state?.targets || []), ...(snapshot.data?.state?.results || [])]
+    .filter(item => item.provider && item.model);
+  const unique = [...new Map(targets.map(item => [JSON.stringify([item.provider, item.model]), item])).values()];
+  const summaries = unique.map(item => {
+    const result = core.indicatorStatus(snapshot.data?.state, snapshot.error, item);
+    return `${core.modelLabel(item.provider, item.model)}：${result.label}${result.record ? ' · ' + core.dateTime(result.record.time, true) : ''}`;
+  });
   const title = ['模型质量检测：' + status.label,
-    record ? `模型：${core.modelLabel(record.provider, record.model)}` : '',
+    selection ? `当前对话：${core.modelLabel(selection.provider, selection.model)}` : '当前对话模型尚未确定',
     record ? `题目：${prompt?.name || record.prompt} · ${core.dateTime(record.time, true)}` : '',
     status.runningCount > 1 ? `共 ${status.runningCount} 个检测正在运行` : '',
-    '汇总所有检测目标；运行优先，否则显示最近记录。仅代表该次题目结果。'].filter(Boolean).join('\n');
+    summaries.length ? '各检测模型（各自运行优先，否则最近结果）：\n' + summaries.join('\n') : '',
+    '主灯仅对应当前对话模型；复测通过保留前次失败提示，待人工评审不代表通过。仅代表对应题目结果。'].filter(Boolean).join('\n');
   const colors = {idle: '#9299a5', running: '#479cf5', passed: '#29ad73', retested: '#e4ae28',
     failed: '#e44f59', error: '#e88036', manual: '#a484df'};
   return h('span', {title, role: 'img', 'aria-label': title,
@@ -1545,14 +1583,14 @@ function apply(ctx) {
     id: PANEL_ID,
     order: 30,
     label: '模型质量检测',
-  }, PanelIcon));
+  }, props => h(PanelIcon, {...props, context: ctx})));
   ctx.slots.inject('main', () => ctx.slots.register({
     name: 'main',
     key: PANEL_ID,
   }, CheckPage));
 }
 
-const inject = ['slots'];
+const inject = ['slots', 'sessions', 'modelDirectories'];
 
 const CSS = `
 .dic-page {

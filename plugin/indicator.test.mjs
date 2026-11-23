@@ -3,6 +3,13 @@ import assert from 'node:assert/strict';
 import {core} from './client-core.mjs';
 const record = (verdict, extra = {}) => ({provider:'p', model:'m', prompt:'milk', time:'2026-11-23T12:00:00Z', verdict, ...extra});
 const status = (results, error) => core.indicatorStatus({results}, error);
+test('current model never borrows another model or provider result; effort does not affect identity', () => {
+ const results = [record('failed'), record('passed',{model:'other',time:'2026-11-23T12:01:00Z'}), record('running',{provider:'other'})];
+ assert.equal(core.indicatorStatus({results},null,{provider:'p',model:'m',reasoningEffort:'auto'}).tone,'failed');
+ assert.equal(core.indicatorStatus({results},null,{provider:'p',model:'untested'}).tone,'idle');
+ assert.equal(core.indicatorStatus({results},null,null).label,'当前对话模型未知');
+ assert.equal(core.indicatorStatus({results},new Error('offline'),null).tone,'error');
+});
 test('indicator: empty and disconnected cannot appear passed', () => {
  assert.equal(status([]).tone, 'idle');
  assert.equal(status([record('passed')], new Error('offline')).tone, 'error');

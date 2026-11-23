@@ -151,7 +151,12 @@ function sanitizeSVG(answer) {
 }
 
 // Summarize quality checks only: fingerprint similarity is not a quality verdict.
-function indicatorStatus(state, error) {
+function indicatorStatus(state, error, selection) {
+  if (arguments.length >= 3) {
+    if (error) return {tone: 'error', label: '连接异常'};
+    if (!selection?.provider || !selection?.model) return {tone: 'idle', label: '当前对话模型未知'};
+    state = state && {...state, results: (state.results || []).filter(item => item.provider === selection.provider && item.model === selection.model)};
+  }
   if (error) return {tone: 'error', label: '连接异常'};
   if (!state) return {tone: 'idle', label: '正在读取检测状态'};
   const records = (state.results || []).filter(item => item.prompt !== 'modeltrace')

@@ -62,14 +62,31 @@ async function pageWith(overrides) {
   return {page: registrations.find(item => item.definition.name === 'main').component, React};
 }
 
+test('current model subscription follows session and model switches and cleans up', async () => {
+ const source = await readFile(path.join(root, 'plugin/client-panel.js'), 'utf8');
+ const watch = vm.runInNewContext('(' + source.slice(source.indexOf('function watchCurrentModel'), source.indexOf('\nfunction PanelIcon')) + ')');
+ const observable = value => { const listeners = new Set(); return {getSnapshot:()=>value, subscribe:fn=>{listeners.add(fn);return()=>listeners.delete(fn);}, set:next=>{value=next;for(const fn of [...listeners]) fn();}, listeners}; };
+ const list = observable({byId:{a:{id:'a',retainedBy:{mainView:1}}}});
+ const a = observable({current:{provider:'p',model:'a',reasoningEffort:'auto'}});
+ const b = observable({current:{provider:'p',model:'b'}});
+ const services = {sessions:{list},modelDirectories:{directoryFor:id=>({store:id==='a'?a:b})}};
+ const values = []; const stop = watch({get:key=>services[key]},value=>values.push(value));
+ assert.equal(values.at(-1).model,'a');
+ a.set({current:{provider:'p',model:'changed'}}); assert.equal(values.at(-1).model,'changed');
+ list.set({byId:{b:{id:'b',retainedBy:{mainView:1}}}}); assert.equal(values.at(-1).model,'b'); assert.equal(a.listeners.size,0);
+ list.set({byId:{}}); assert.equal(values.at(-1),null); assert.equal(b.listeners.size,0);
+ stop(); assert.equal(list.listeners.size,0);
+});
+
 test('sidebar indicator stays visible and describes model, prompt, time without claiming session identity', async () => {
-  const {exports} = await loadBundle([{data: {state: {results: [{provider: 'p', model: 'm', prompt: 'milk', verdict: 'passed', time: '2026-11-23T12:00:00Z'}]}, prompts: [{id: 'milk', name: '牛奶题'}]}, error: null}]);
+  const {exports} = await loadBundle([{provider: 'p', model: 'm'}, {data: {state: {results: [{provider: 'p', model: 'm', prompt: 'milk', verdict: 'passed', time: '2026-11-23T12:00:00Z'}]}, prompts: [{id: 'milk', name: '牛奶题'}]}, error: null}]);
   const {registrations} = registrationsOf(exports);
-  const icon = registrations.find(item => item.definition.name === 'sidebar.panellist').component({size: 20});
+  const wrapped = registrations.find(item => item.definition.name === 'sidebar.panellist').component({size: 20});
+  const icon = wrapped.type(wrapped.props);
   assert.match(icon.props.title, /p \/ m/);
   assert.match(icon.props.title, /牛奶题/);
   assert.match(icon.props.title, /11.*23/);
-  assert.match(icon.props.title, /最近记录/);
+  assert.match(icon.props.title, /主灯仅对应当前对话模型/);
   assert.equal(icon.children[0].children[0].props.fill, '#29ad73');
 });
 
@@ -100,7 +117,7 @@ const state = {
 test('the client bundle is a single factory for the package id', async () => {
   const {exports, source, external} = await loadBundle();
   assert.deepEqual(external, ['react']);
-  assert.deepEqual(Array.from(exports.inject), ['slots']);
+  assert.deepEqual(Array.from(exports.inject), ['slots', 'sessions', 'modelDirectories']);
   assert.equal(typeof exports.apply, 'function');
   assert.match(source, /window\.__ModuleLoader__\.load\(\{ id: "dsh-intelligence-check"/);
   assert.doesNotMatch(source, /^\s*import\s/m, 'bundled client must not keep ESM imports');
@@ -117,7 +134,8 @@ test('apply registers the sidebar entry and the same-id main page', async () => 
   assert.equal(main.definition.key, 'dsh-intelligence-check');
   assert.equal(typeof sidebar.component, 'function');
   assert.equal(typeof main.component, 'function');
-  const indicator = sidebar.component({size: 18});
+  const wrapper = sidebar.component({size: 18});
+  const indicator = wrapper.type(wrapper.props);
   assert.equal(indicator.props.role, 'img');
   assert.equal(indicator.children[0].props.width, 18);
 });
