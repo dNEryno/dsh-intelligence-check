@@ -52,12 +52,15 @@ function profile(options = {}) {
         yield {type: 'finish', reason: {kind: 'stop'}};
       },
     },
-    injectRoutes(rejection = 0) {
+    injectRoutes() {
       for (const {fn} of injections) {
         fn({
           effect(nested) { const dispose = nested(); disposers.push(dispose); return dispose; },
           webServer: {register(route) { routes.push(route); return () => {}; }},
-          connection: {requestRejection: () => rejection},
+          // DSH 0.2.3 removed connection.requestRejection. The host half now
+          // authorizes with the peer handed to the handler as its third
+          // argument, so these tests supply the peer instead.
+          connection: {},
         });
       }
       return routes;
@@ -77,8 +80,12 @@ function profile(options = {}) {
   };
 }
 
-async function serve(route) {
-  const server = createServer((request, response) => route.handler(request, response));
+// DSH 的 WebServer 先认证 required 路由，再把 peer 传给 handler；桌面页面因此
+// 永远以 owner 身份到达。测试要模拟同一契约，否则 handler 会一律回 403。
+const ownerPeer = {principal: {kind: 'owner'}};
+
+async function serve(route, peer = ownerPeer) {
+  const server = createServer((request, response) => route.handler(request, response, peer));
   await new Promise((resolve, reject) => {
     server.once('error', reject);
     server.listen(0, '127.0.0.1', resolve);
@@ -121,11 +128,13 @@ test('desktop detection and the shared user-level data directory', () => {
   assert.equal(isDesktopHost({DSH_CLIENT_VERSION: '0.2.2'}), true);
   assert.equal(isDesktopHost({DSH_INTELLIGENCE_CHECK_DESKTOP: '1'}), true);
   assert.equal(isDesktopHost({}, {desktop: true}), true);
-  assert.equal(sharedDataDir({DSH_HOME: '/tmp/home'}), '/tmp/home/dsh-intelligence-check');
+  // path.join 让断言在 Windows 上同样成立（分隔符不同不算失败）。
+  const homeDir = path.join('/tmp/home', 'dsh-intelligence-check');
+  assert.equal(sharedDataDir({DSH_HOME: '/tmp/home'}), homeDir);
   assert.equal(sharedDataDir({}), path.join(os.homedir(), '.dsh', 'dsh-intelligence-check'));
   // Legacy per-profile and plugin-env overrides no longer select a data directory.
-  assert.equal(sharedDataDir({DSH_HOME: '/tmp/home'}, {dataDir: '/tmp/explicit'}), '/tmp/home/dsh-intelligence-check');
-  assert.equal(sharedDataDir({DSH_HOME: '/tmp/home', DSH_INTELLIGENCE_CHECK_DATA_DIR: '/tmp/env'}), '/tmp/home/dsh-intelligence-check');
+  assert.equal(sharedDataDir({DSH_HOME: '/tmp/home'}, {dataDir: '/tmp/explicit'}), homeDir);
+  assert.equal(sharedDataDir({DSH_HOME: '/tmp/home', DSH_INTELLIGENCE_CHECK_DATA_DIR: '/tmp/env'}), homeDir);
 });
 
 test('legacy data-directory overrides cannot split the shared configuration, targets, records or reviews', {
@@ -305,7 +314,10 @@ test('profiles share one backend, one catalog authority, and keep working when t
   }
 });
 
-test('a CLI host started before the desktop connects on a later request without spawning', async () => {
+test('a CLI host started before the desktop connects on a later request without spawning', {
+  skip: process.platform === 'win32' ? '该共享后台回归使用 POSIX 进程观测' : false,
+  timeout: 30000,
+}, async () => {
   const dataDir = mkdtempSync(path.join(os.tmpdir(), 'dsh-ic-cli-late-'));
   const restoreEnv = setEnv({DSH_HOME: dataDir});
   const cli = profile({catalog: catalogFor('provider-two')});
@@ -337,7 +349,10 @@ test('a CLI host started before the desktop connects on a later request without 
   }
 });
 
-test('a CLI host joins the running desktop backend without starting or overriding it', async () => {
+test('a CLI host joins the running desktop backend without starting or overriding it', {
+  skip: process.platform === 'win32' ? '该共享后台回归使用 POSIX 进程观测' : false,
+  timeout: 30000,
+}, async () => {
   const dataDir = mkdtempSync(path.join(os.tmpdir(), 'dsh-ic-cli-join-'));
   const restoreEnv = setEnv({DSH_HOME: dataDir});
   const desktop = profile({catalog: catalogFor('provider-one')});
@@ -372,7 +387,11 @@ test('a CLI host joins the running desktop backend without starting or overridin
   }
 });
 
-test('the page API forwards preview isolation response headers', async () => {
+test('the page API forwards preview isolation response headers', {
+  // The fixture is a shebang .mjs spawned directly; Windows cannot exec it (EFTYPE).
+  skip: process.platform === 'win32' ? '该夹具直接 spawn shebang .mjs，仅 POSIX 可执行' : false,
+  timeout: 30000,
+}, async () => {
   const dataDir = mkdtempSync(path.join(os.tmpdir(), 'dsh-ic-headers-'));
   const upstream = createServer((request, response) => {
     response.writeHead(200, {
@@ -412,19 +431,22 @@ setInterval(() => {}, 1000);
   }
 });
 
-test('the native page API rejects unauthenticated host requests', async () => {
+test('the native page API only serves requests the host admitted as owner', async () => {
   const p = profile();
   const dataDir = mkdtempSync(path.join(os.tmpdir(), 'dsh-ic-reject-'));
   const restoreEnv = setEnv({DSH_HOME: dataDir});
   try {
     await apply(p.ctx, {binaryPath, desktop: true});
-    const [route] = p.ctx.injectRoutes(401);
-    const server = await serve(route);
-    try {
-      const response = await fetch(server.origin + '/dsh-intelligence-check/api/state');
-      assert.equal(response.status, 401);
-    } finally {
-      await server.close();
+    const [route] = p.ctx.injectRoutes();
+    // serve() 的默认参数只在实参为 undefined 时生效，这里用 null 表示"宿主没给 peer"。
+    for (const peer of [null, {principal: {kind: 'guest'}}]) {
+      const server = await serve(route, peer);
+      try {
+        const response = await fetch(server.origin + '/dsh-intelligence-check/api/state');
+        assert.equal(response.status, 403, `peer=${JSON.stringify(peer)} 未被拒绝`);
+      } finally {
+        await server.close();
+      }
     }
   } finally {
     await p.ctx.dispose();

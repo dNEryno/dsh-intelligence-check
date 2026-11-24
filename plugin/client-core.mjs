@@ -151,6 +151,24 @@ function sanitizeSVG(answer) {
 }
 
 // Summarize quality checks only: fingerprint similarity is not a quality verdict.
+// Automatic checks only fire at the next interval tick, and every settings or
+// target change restarts that interval. Kicking one round at the moment the user
+// turns monitoring on is the difference between "it works" and "nothing happens".
+function autoKickTargets(state, change) {
+  if (!change) return [];
+  const autoEnabled = change.type === 'auto' ? Boolean(change.enabled) : Boolean(state?.config?.auto_enabled);
+  if (!autoEnabled) return [];
+  const targets = state?.targets || [];
+  if (change.type === 'target') {
+    if (!change.enabled) return [];
+    return targets.filter(item => item.provider === change.provider && item.model === change.model);
+  }
+  if (change.type === 'auto') {
+    return targets.filter(item => item.enabled);
+  }
+  return [];
+}
+
 function indicatorStatus(state, error, selection) {
   if (arguments.length >= 3) {
     if (error) return {tone: 'error', label: '连接异常'};
@@ -179,6 +197,7 @@ function indicatorStatus(state, error, selection) {
 
 export const core = {
   identity, modelLabel, names, reviewNames, isCancelled, displayVerdict, indicatorStatus,
+  autoKickTargets,
   dateTime, reportedTokens, usageLabel, usageTotals,
   dayCount, traceRunning, traceBatchState, traceChallenge, filterResults, analyzeAnswer, sanitizeSVG,
 };

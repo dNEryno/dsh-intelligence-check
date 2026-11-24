@@ -2,7 +2,10 @@ import {createServer} from 'node:http';
 import {randomBytes, timingSafeEqual} from 'node:crypto';
 
 const MAX_REQUEST_BYTES = 1024 * 1024;
-const DEFAULT_MAX_TOKENS = 8192;
+// 后台 Go 端每次调用都显式送它自己硬编码的 8192（transport.go 的
+// DefaultMaxTokens），所以这里的值不是「缺省」而是「下限」：推理模型光思考
+// 就能吃掉 8192，回答还没开始就被截断成空回答。
+const DEFAULT_MAX_TOKENS = 16384;
 
 function authorized(header, token) {
   const expected = Buffer.from('Bearer ' + token);
@@ -101,9 +104,10 @@ export async function createBridge(llm) {
         provider: input.target.provider,
         model: input.target.model,
         messages: [{role: 'user', content: [{type: 'text', text: input.prompt}]}],
-        maxTokens: Number.isInteger(input.params?.max_tokens) && input.params.max_tokens > 0
-          ? input.params.max_tokens
-          : DEFAULT_MAX_TOKENS,
+        maxTokens: Math.max(
+          Number.isInteger(input.params?.max_tokens) && input.params.max_tokens > 0 ? input.params.max_tokens : 0,
+          DEFAULT_MAX_TOKENS,
+        ),
         signal: controller.signal,
       });
       for await (const chunk of stream) {

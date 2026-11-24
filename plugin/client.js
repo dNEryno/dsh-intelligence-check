@@ -369,6 +369,24 @@ function sanitizeSVG(answer) {
 }
 
 // Summarize quality checks only: fingerprint similarity is not a quality verdict.
+// Automatic checks only fire at the next interval tick, and every settings or
+// target change restarts that interval. Kicking one round at the moment the user
+// turns monitoring on is the difference between "it works" and "nothing happens".
+function autoKickTargets(state, change) {
+  if (!change) return [];
+  const autoEnabled = change.type === 'auto' ? Boolean(change.enabled) : Boolean(state?.config?.auto_enabled);
+  if (!autoEnabled) return [];
+  const targets = state?.targets || [];
+  if (change.type === 'target') {
+    if (!change.enabled) return [];
+    return targets.filter(item => item.provider === change.provider && item.model === change.model);
+  }
+  if (change.type === 'auto') {
+    return targets.filter(item => item.enabled);
+  }
+  return [];
+}
+
 function indicatorStatus(state, error, selection) {
   if (arguments.length >= 3) {
     if (error) return {tone: 'error', label: '连接异常'};
@@ -397,6 +415,7 @@ function indicatorStatus(state, error, selection) {
 
 const core = {
   identity, modelLabel, names, reviewNames, isCancelled, displayVerdict, indicatorStatus,
+  autoKickTargets,
   dateTime, reportedTokens, usageLabel, usageTotals,
   dayCount, traceRunning, traceBatchState, traceChallenge, filterResults, analyzeAnswer, sanitizeSVG,
 };
@@ -784,22 +803,34 @@ function HtmlPreview(props) {
 function SettingsDialog(props) {
   const {draft, setDraft, dirty, setDirty, onClose, onSave, busy, message, autoPromptName} = props;
   const ref = useRef(null);
+  // Closing used to drop an unsaved toggle silently, which read as "the switch
+  // does not stay on". Ask once instead of throwing the edit away.
+  const [guard, setGuard] = useState('');
+  const warned = useRef(false);
+  const attemptClose = useCallback(() => {
+    if (dirty && !warned.current) {
+      warned.current = true;
+      setGuard('有未保存的修改。再次点击关闭将放弃这些修改。');
+      return;
+    }
+    onClose();
+  }, [dirty, onClose]);
   useEffect(() => {
-    const handler = event => { if (event.key === 'Escape') onClose(); };
+    const handler = event => { if (event.key === 'Escape') attemptClose(); };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
-  }, [onClose]);
+  }, [attemptClose]);
   useEffect(() => {
     ref.current?.querySelector('input')?.focus();
   }, []);
   const intervalLabel = intervalText(draft.interval_seconds);
-  return h('div', {className: 'dic-modal-backdrop', onMouseDown: event => { if (event.target === event.currentTarget) onClose(); }},
+  return h('div', {className: 'dic-modal-backdrop', onMouseDown: event => { if (event.target === event.currentTarget) attemptClose(); }},
     h('div', {className: 'dic-modal dic-settings', role: 'dialog', 'aria-modal': 'true', 'aria-labelledby': 'dic-settings-title', ref},
       h('div', {className: 'dic-modal-head dic-settings-head'},
         h('div', {className: 'dic-settings-heading'},
           h('h2', {id: 'dic-settings-title'}, '检测设置'),
           h('p', {className: 'dic-hint'}, '自动检测与请求预算')),
-        h(Button, {icon: 'x', label: '关闭设置', className: 'dic-settings-close', onClick: onClose})),
+        h(Button, {icon: 'x', label: '关闭设置', className: 'dic-settings-close', onClick: attemptClose})),
       h('form', {className: 'dic-settings-form', onSubmit: event => { event.preventDefault(); onSave(draft); }},
         h('fieldset', {className: 'dic-settings-group'},
           h('legend', {className: 'dic-settings-legend'}, '自动检测'),
@@ -833,6 +864,7 @@ function SettingsDialog(props) {
               })),
             h('span', {className: 'dic-settings-affix'}, '次 / 模型 / 天'))),
         h('p', {className: 'dic-hint dic-settings-note'}, '模型目录与凭据由 DSH 桌面应用提供，页面不保存网关地址或模型 API Key。'),
+        guard ? h('p', {className: 'dic-error', role: 'alert'}, guard) : null,
         message?.text ? h('p', {className: message.ok ? 'dic-hint' : 'dic-error', role: message.ok ? 'status' : 'alert'}, message.text) : null,
         h('div', {className: 'dic-modal-actions dic-settings-actions'},
           h('span', {className: 'dic-hint'}, dirty ? '有未保存的修改' : '修改后点击保存'),
@@ -1018,6 +1050,21 @@ function CheckPage() {
     }
   }
 
+  // 开启监测／自动检测只会在下一个间隔整点生效，而且每次改设置都会重新计时。
+  // 开关按下后立刻补跑一轮，否则界面看起来就是「勾了没反应」。
+  async function kickAutoRound(list, success) {
+    if (!list.length) return;
+    setFeedback({text: success, ok: true, scope: 'page'});
+    try {
+      for (const item of list) {
+        await request('/action', {provider: item.provider, model: item.model, action: 'test'});
+      }
+      await refresh();
+    } catch (failure) {
+      setFeedback({text: describeFailure(failure, '首轮检测未能启动'), ok: false, scope: 'page'});
+    }
+  }
+
   function startTest() {
     if (!target) { setFeedback({text: '请先从 DSH 模型目录添加检测目标', ok: false, scope: 'page'}); return; }
     const ids = new Set(state.results.map(item => item.id));
@@ -1135,7 +1182,11 @@ function CheckPage() {
                 h('td', null, h('div', {className: 'dic-monitor-state'},
                   h('label', {className: 'dic-toggle', title: `监测 ${label}`},
                     h('input', {type: 'checkbox', checked: item.enabled, 'aria-label': `监测 ${label}`, disabled: Boolean(busy),
-                      onChange: event => act('toggle', '/target', {provider: item.provider, model: item.model, enabled: event.target.checked})}),
+                      onChange: event => {
+                        const change = {type: 'target', provider: item.provider, model: item.model, enabled: event.target.checked};
+                        act('toggle', '/target', {provider: item.provider, model: item.model, enabled: change.enabled})
+                          .then(result => { if (result.ok) kickAutoRound(core.autoKickTargets(state, change), `${label}：已开启监测，正在做首轮检测`); });
+                      }}),
                     h('span', {className: 'dic-toggle-track'})),
                   h('span', {className: 'dic-hint'}, item.enabled ? '已开启' : '已关闭'))),
                 h('td', null, h('div', {className: 'dic-row-actions'},
@@ -1567,6 +1618,10 @@ function CheckPage() {
         setConfigDirty(false);
         setSettingsMessage({text: '', ok: true});
         closeSettings();
+        if (!state?.config.auto_enabled && values.auto_enabled) {
+          kickAutoRound(core.autoKickTargets(state, {type: 'auto', enabled: true}),
+            '已开启自动检测，正在对已开启监测的目标做首轮检测');
+        }
       }),
     }) : null);
 }
