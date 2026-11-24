@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 	"testing"
@@ -52,6 +53,11 @@ func readStartInfo(t *testing.T, stdout *bufio.Reader) startInfo {
 func TestSharedInstanceConnectsToOwner(t *testing.T) {
 	dir := t.TempDir()
 	binary := filepath.Join(dir, "quality-check-test")
+	// The toolchain appends the executable suffix on Windows; exec.Command does
+	// not, so the path has to carry it or the lookup fails.
+	if runtime.GOOS == "windows" {
+		binary += ".exe"
+	}
 	build := exec.Command("go", "build", "-o", binary, ".")
 	build.Env = os.Environ()
 	if output, err := build.CombinedOutput(); err != nil {
@@ -95,7 +101,9 @@ func TestSharedInstanceConnectsToOwner(t *testing.T) {
 	if published.Origin != info.Origin || published.Control != info.Control {
 		t.Fatalf("published connection = %+v, owner = %+v", published, info)
 	}
-	if stat, err := os.Stat(connectionPath); err != nil || stat.Mode().Perm() != 0o600 {
+	// Windows does not carry POSIX permission bits, so only check the mode where
+	// the filesystem actually stores it.
+	if stat, err := os.Stat(connectionPath); err != nil || (runtime.GOOS != "windows" && stat.Mode().Perm() != 0o600) {
 		t.Fatalf("connection permissions = %v, %v", stat.Mode().Perm(), err)
 	}
 
@@ -112,6 +120,13 @@ func TestSharedInstanceConnectsToOwner(t *testing.T) {
 		t.Fatalf("join = %+v, owner = %+v", joined, info)
 	}
 
+	// Windows has no SIGTERM, so the graceful-shutdown contract can only be
+	// exercised on POSIX. The joiner assertions above already ran here.
+	if runtime.GOOS == "windows" {
+		owner.Process.Kill()
+		owner.Wait()
+		return
+	}
 	if err := owner.Process.Signal(syscall.SIGTERM); err != nil {
 		t.Fatal(err)
 	}

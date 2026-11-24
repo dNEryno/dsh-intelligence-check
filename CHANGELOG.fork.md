@@ -1,5 +1,18 @@
 # Fork changes / 分支修改日志
 
+## 2026-11-24 — Grade the answer, not one literal token
+
+- 误判根因：`internal/check/client.go` 只用一条正则 `(\d+\.?\d*)\s*(inches|inch|英寸)` 取**最后一个**匹配跟 `46.24` 比字面。模型答对时的常见写法 `\boxed{46.24\text{ inches}}` 中间隔着反斜杠，正则匹配不上；而答对后顺手补一句「约 3 英尺 10.24 英寸」，最后一个匹配就成了 `10.24`。实测用户 16 条记录里，9 条真写出了答案，其中 **5 条被判 failed 是误杀**。
+- 判分改为按「最终答案」语义读，四级信号：
+  1. 显式 `\boxed{…}` 里的值只要等于正确答案就通过——模型有时会把中间结果也框起来，所以框内不符时**不否决**，继续往下判；
+  2. 最后一个「final answer / answer / 结论 / 答案 / 因此 / 所以 / thus / therefore」标记之后**第一个**数——模型在这里声明自己的结论，即使前文草稿里出现过 46.24，写了别的也照样判失败；
+  3. 最后一个带英寸单位的数；
+  4. 全文最后一个数。
+- 比较按**三位有效数字**：`46.2`、`46.24`、`46.2426` 视为同一答案，`46.236` 也算对；判分前先剥离 `**`、`$`、反引号与 `\text{…}` 一类的 LaTeX 包装，并去掉千位分隔符。
+- `cmd/quality-check/main_test.go` 原本假设 POSIX：产物名不带 `.exe`、断言 `0o600` 权限位、用 `SIGTERM` 关进程。改为按平台分支，Windows 上跳过只在 POSIX 成立的那三处。
+- 新增 `internal/check/client_test.go`，15 条用例里 4 条是本机真实存下的答案原文（含被误杀的 `\boxed{46.24\text{ inches}}` 加「约 3 英尺 10.24 英寸」那条）。
+- Validation: 旧判分下新用例红（6 条失败），换新判分后绿；`go vet ./...` 干净，`go test ./...` 全过（`cmd/quality-check` 与 `internal/check` 两个包）；重编译的 `bin/quality-check.exe` 通过 `/health` 与 `/api/state` 冒烟；端到端实跑一轮牛奶题（foxrouter / deepseek-v4.1-flash-1017），答案正是 `\boxed{46.24\text{ inches}}` + 「约 3 ft 10.24 in」的写法，判定 **passed**。需要 Go 1.27.4 工具链（本机装在 `C:\36\tmp\go-toolchain`，未装进 PATH）。
+
 ## 2026-11-24 — Stop the empty answers and the "switch does nothing" feeling
 
 - 空回答根因：后台 Go 端 `transport.go` 的 `DefaultMaxTokens = 8192` 是硬编码，且 `service.go:536`／`modeltrace.go:107` 每次调用都显式送 `max_tokens`，所以桥接层的「默认值」根本不会被用到。推理模型光思考就能吃掉 8192，回答还没开始就被截断，记录因此是「空回答」。桥接层改为取**下限**：`Math.max(请求值, 16384)`，调用方自己要求更大预算时仍以调用方为准。
